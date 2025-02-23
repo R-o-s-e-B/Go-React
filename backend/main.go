@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -17,9 +19,6 @@ type Player struct {
 
 
 var upgrader = websocket.Upgrader{
-	//ReadBufferSize: 1024,
-	//WriteBufferSize: 1024,
-
 	CheckOrigin: func(r *http.Request) bool {return true},
 }
 
@@ -42,17 +41,34 @@ func reader(conn *websocket.Conn) {
 }
 
 var clients = make(map[*websocket.Conn]string) // Connected clients
+var mu sync.Mutex
 var players = make(map[string]Player)   
 
 func handleMessages(conn *websocket.Conn) {
 	defer func() {
+			mu.Lock()
 			playerID, exists := clients[conn]
+			log.Println("Before removing: playerID =", playerID, "exists =", exists)
+			
 			if exists {
-					delete(players, playerID) // Remove player from the list
-					delete(clients, conn)     // Remove connection from clients
-					broadcast()               // Notify others
+					log.Println("Player disconnected:", playerID)
+					delete(players, playerID)
+					delete(clients, conn)
+					log.Println("Players after removal:", players)
+					go broadcast() 
 			}
-			conn.Close()
+			mu.Unlock()
+
+			// Send WebSocket close message
+			deadline := time.Now().Add(5 * time.Second)
+			err := conn.WriteControl(websocket.CloseMessage, 
+					websocket.FormatCloseMessage(websocket.CloseNormalClosure, "Goodbye"), 
+					deadline)
+			if err != nil {
+					log.Println("Error sending close message:", err)
+			}
+
+			conn.Close() // Finally close the connection
 	}()
 
 	for {
@@ -68,28 +84,43 @@ func handleMessages(conn *websocket.Conn) {
 					continue
 			}
 
-			// Update player movement
+			mu.Lock()
+			if _, exists := clients[conn]; !exists || clients[conn] == "" {
+					clients[conn] = player.ID // Assign player ID when first received
+			}
 			players[player.ID] = player
+			mu.Unlock()
+
 			broadcast()
 	}
 }
 
 
+
+
 func broadcast() {
-	playerList, err := json.Marshal(players) // Convert players map to JSON
-	//log.Println("This is the player list", playerList)
-	log.Println("Broadcasting players:", string(playerList)) // Debugging
+	mu.Lock()
+	defer mu.Unlock()
+
+	playerList, err := json.Marshal(players) // Convert to JSON
 	if err != nil {
-		log.Println("Error marshalling players:", err)
-		return
+			log.Println("Error marshalling players:", err)
+			return
 	}
 
+
 	for conn := range clients {
-		if err := conn.WriteMessage(websocket.TextMessage, playerList); err != nil {
-			log.Println("Error sending message:", err)
-		}
+			err := conn.WriteMessage(websocket.TextMessage, playerList)
+			if err != nil {
+					log.Println("Broadcast error:", err)
+					conn.Close()
+					delete(clients, conn)
+			}
 	}
 }
+
+
+
 
 
 
@@ -98,14 +129,11 @@ func serveWs(w http.ResponseWriter, r *http.Request) {
 
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Println("WebSocket upgrade error:", err)
-		return
+			log.Println("WebSocket upgrade error:", err)
+			return
 	}
 
-	// Store the connection, but don't create a player yet
-	clients[ws] = "" // No player assigned yet
-
-	go handleMessages(ws)
+	go handleMessages(ws) // Move player assignment inside handleMessages
 }
 
 

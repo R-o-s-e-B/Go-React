@@ -1,4 +1,4 @@
-let socket;
+let socket = new WebSocket("ws://localhost:8080/ws");
 
 export const connect = () => {
   if (socket && socket.readyState === WebSocket.OPEN) {
@@ -52,7 +52,14 @@ export const subscribeToUpdates = (callback) => {
       if (typeof event.data === "string") {
         const updatedPlayers = JSON.parse(event.data);
         console.log("Updating players in subscribe function", updatedPlayers);
-        callback(updatedPlayers);
+        callback((prevPlayers) => {
+          // Remove players who are no longer in updatedPlayers
+          const filteredPlayers = Object.fromEntries(
+            Object.entries(prevPlayers).filter(([id]) => updatedPlayers[id])
+          );
+
+          return { ...filteredPlayers, ...updatedPlayers };
+        });
       } else {
         console.error("Received non-string data from WebSocket:", event.data);
       }
